@@ -1,0 +1,74 @@
+import pandas as pd
+import re
+import requests
+
+# 1) Download the log file
+url = 'https://raw.githubusercontent.com/Mariamhelalll/ieuk-task-2025/main/sample-log.log'
+try:
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+except requests.RequestException as e:
+    raise SystemExit(f" Error! Error fetching log file: {e}")
+
+lines = [L.strip() for L in resp.text.splitlines()]
+print(f"📄 Loaded {len(lines)} lines. First 3 for inspection:")
+for L in lines[:3]:
+    print("   ", L)
+
+# 2) Compile a more flexible, anchored regex
+log_pattern = re.compile(r"""
+    ^
+    (?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s+      # IP address
+    \S+\s+                                  # ident (usually '-')
+    (?P<user>\S+)\s+                        # user (usually '-')
+    (?P<country_code>\S+)\s+                # Country code
+    \[(?P<timestamp>[^\]]+)\]\s+            # [timestamp]
+    "(?P<method>\S+)\s+(?P<url>\S+)\s+(?P<protocol>[^"]+)"\s+
+                                            # "METHOD URL PROTOCOL"
+    (?P<status>\d{3})\s+                    # 3-digit status code
+    (?P<size>\d+|-)\s+                      # response size or "-"
+    "(?P<referrer>[^"]*)"\s+                # Referrer field
+    "(?P<user_agent>[^"]*)"\s*              # User agent field
+    (?P<trailing_number>\d+)?               # Optional trailing number
+    $
+    """, re.VERBOSE)
+
+# 3) Parse each line
+parsed = []
+for idx, line in enumerate(lines, 1):
+    m = log_pattern.match(line)
+    if m:
+        parsed.append(m.groupdict())
+    else:
+        # Uncomment to debug non-matching lines:
+        print(f"Error! No match on line {idx}: {line}")
+        pass
+
+
+# 4) Build DataFrame & convert types
+df = pd.DataFrame(parsed)
+df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce') 
+df['status']    = pd.to_numeric(df['status'], errors='coerce')
+df['size']      = pd.to_numeric(df['size'],   errors='coerce')
+df['trailing_number'] = pd.to_numeric(df['trailing_number'], errors='coerce') # Convert trailing number
+
+# 5) Simple bot-detection: in CLF logs, 'user' is almost always '-' for anonymous/bot clients
+# The actual log format has an extra field before the timestamp which we've captured as 'country_code'.
+# Let's use the 'user' field from the original CLF spec which is the third field, still likely to be '-' for bots.
+df['is_bot'] = df['user_agent'].str.contains('bot', case=False, na=False) | (df['referrer'] == '-') # A more robust bot detection might involve checking user agent strings or known bot IPs. Here, we'll use user_agent containing 'bot' or empty referrer as a proxy.
+
+
+# 6) Split into humans vs. bots
+humans = df[~df['is_bot']].copy()
+bots   = df[ df['is_bot']].copy()
+
+# 7) Save results
+humans.to_csv('parsed_humans.csv', index=False)
+bots  .to_csv('parsed_bots.csv',   index=False)
+
+# 8) Report
+print("Done! Parsed DataFrame preview:")
+print(df.head())
+print(f"Done! Total requests: {len(df)}")
+print(f"Done!  Human requests: {len(humans)} → parsed_humans.csv")
+print(f"Done! Bot requests:   {len(bots)}   → parsed_bots.csv")
